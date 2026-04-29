@@ -3,83 +3,78 @@ import curses
 from time import sleep
 
 
-class PiDogController:
-    """Initializes the PiDog with init values"""
-    def __init__(self):
+from pidog import Pidog
+import curses
+from time import sleep
+
+
+class PiDogActions:
+    """All actions the dog can do."""
+
+    def __init__(self, dog):
+        self.dog = dog
+        self.status = "Bereit"
+
         self.stand_angles = [25, 25, -25, -25, 70, -45, -70, 45]
         self.sit_angles = [30, 30, -30, -30, 80, -45, -80, 45]
-        
-        self.dog = Pidog(  
-            leg_init_angles=self.sit_angles,
-            head_init_angles=[2, 2, -25],
-            tail_init_angle=[0]
-        )
 
-        sleep(0.5)
-        self.running = True
-        self.status = "Bereit"
-        
-        
-        
     def go_home(self, pose="stand"):
         if pose == "stand":
             self.stand()
         elif pose == "sit":
             self.sit()
-    
-    """Dog Lies down"""
-    def lie_down(self):
-        self.status = "Lie down"
-        self.dog.do_action("lie", step_count=1, speed=100)
-        
-    
+
     def stand(self):
         self.status = "Stand"
         self.dog.do_action("stand", step_count=1, speed=70)
-        
-    def walkf(self):
-        self.status = "Forward"
-        self.dog.do_action("forward", step_count=3, speed=98)
         self.dog.wait_all_done()
-        self.go_home("stand")
-
-    def walkb(self):
-        self.status = "Backward"
-        self.dog.do_action("backward", step_count=3, speed=98)
-        self.dog.wait_all_done()
-        self.go_home("stand")
-
 
     def sit(self):
         self.status = "Sit"
         self.dog.legs_move([self.sit_angles], immediately=True, speed=80)
         self.dog.wait_legs_done()
 
-    def doze_off(self):
-        self.status = "Doze off"
-        self.dog.do_action("doze_off", step_count=1, speed=100)
+    def walk_forward(self):
+        self.status = "Forward"
+        self.dog.do_action("forward", step_count=3, speed=98)
+        self.dog.wait_all_done()
+        self.go_home("stand")
 
-    def left(self):
+    def walk_backward(self):
+        self.status = "Backward"
+        self.dog.do_action("backward", step_count=3, speed=98)
+        self.dog.wait_all_done()
+        self.go_home("stand")
+
+    def turn_left(self):
         self.status = "Turn left"
         self.dog.do_action("turn_left", step_count=1, speed=120)
         self.dog.wait_all_done()
         self.go_home("stand")
-        
-    def right(self):
+
+    def turn_right(self):
         self.status = "Turn right"
         self.dog.do_action("turn_right", step_count=1, speed=120)
         self.dog.wait_all_done()
         self.go_home("stand")
-        
+
+    def lie_down(self):
+        self.status = "Lie down"
+        self.dog.do_action("lie", step_count=1, speed=100)
+        self.dog.wait_all_done()
+
     def bark(self):
         self.status = "Bark"
         self.dog.do_action("head_bark", step_count=1, speed=100)
         self.dog.speak("single_bark_1", volume=50)
         sleep(1)
+        self.go_home("sit")
 
     def pushups(self):
         self.status = "Push ups"
         self.dog.do_action("push_up", step_count=4, speed=50)
+        self.dog.wait_all_done()
+        self.go_home("stand")
 
     def wave(self):
         self.status = "Wave"
@@ -103,46 +98,93 @@ class PiDogController:
         self.dog.wait_legs_done()
         self.go_home("sit")
 
-    def shake_head(self, times=3, speed=100, angle=20):
-        self.status = "Smooth shake head"
+    def shake_head(self):
+        self.status = "Shake head"
 
         home = [0, 0, -25]
-        sequence = []
 
-        for _ in range(times):
-            sequence.extend([
-                [5, 0, -25],
-                [10, 0, -25],
-                [15, 0, -25],
-                [20, 0, -25],
-                [15, 0, -25],
-                [10, 0, -25],
-                [5, 0, -25],
-                [0, 0, -25],
-                [-5, 0, -25],
-                [-10, 0, -25],
-                [-15, 0, -25],
-                [-20, 0, -25],
-                [-15, 0, -25],
-                [-10, 0, -25],
-                [-5, 0, -25],
-                [0, 0, -25],
-            ])
+        sequence = [
+            [10, 0, -25],
+            [20, 0, -25],
+            [10, 0, -25],
+            [0, 0, -25],
+            [-10, 0, -25],
+            [-20, 0, -25],
+            [-10, 0, -25],
+            [0, 0, -25],
+        ]
 
-        sequence.append(home)
+        for _ in range(3):
+            self.dog.head_move(sequence, immediately=True, speed=100)
+            self.dog.wait_head_done()
 
-        self.dog.head_move(sequence, immediately=True, speed=speed)
+        self.dog.head_move([home], immediately=True, speed=80)
         self.dog.wait_head_done()
 
     def stop(self):
         self.status = "Stop"
         self.dog.body_stop()
 
-    def stop_and_sit(self):
-        self.status = "Stop and sit"
-        self.dog.body_stop()
-        sleep(1)
-        self.dog.do_action("sit", step_count=1, speed=100)
+
+class PiDogController:
+    """Keyboard controller for the PiDog."""
+
+    def __init__(self):
+        self.dog = Pidog(
+            leg_init_angles=[30, 30, -30, -30, 80, -45, -80, 45],
+            head_init_angles=[2, 2, -25],
+            tail_init_angle=[0]
+        )
+
+        sleep(0.5)
+
+        self.actions = PiDogActions(self.dog)
+        self.running = True
+
+    @property
+    def status(self):
+        return self.actions.status
+
+    def handle_key(self, key):
+        if key == ord("w") or key == curses.KEY_UP:
+            self.actions.walk_forward()
+
+        elif key == ord("s") or key == curses.KEY_DOWN:
+            self.actions.walk_backward()
+
+        elif key == ord("a") or key == curses.KEY_LEFT:
+            self.actions.turn_left()
+
+        elif key == ord("d") or key == curses.KEY_RIGHT:
+            self.actions.turn_right()
+
+        elif key == ord("e"):
+            self.actions.stand()
+
+        elif key == ord("x"):
+            self.actions.sit()
+
+        elif key == ord("l"):
+            self.actions.lie_down()
+
+        elif key == ord("b"):
+            self.actions.bark()
+
+        elif key == ord("p"):
+            self.actions.pushups()
+
+        elif key == ord("h"):
+            self.actions.wave()
+
+        elif key == ord("n"):
+            self.actions.shake_head()
+
+        elif key == ord(" "):
+            self.actions.stop()
+
+        elif key == ord("q") or key == 27:
+            self.running = False
+            self.actions.status = "Quit"
 
     def cleanup(self):
         try:
@@ -150,48 +192,6 @@ class PiDogController:
             self.dog.close()
         except Exception:
             pass
-
-    def handle_key(self, key):
-        if key == ord("w") or key == curses.KEY_UP:
-            self.walkf()
-
-        elif key == ord("s") or key == curses.KEY_DOWN:
-            self.walkb()
-
-        elif key == ord("a") or key == curses.KEY_LEFT:
-            self.left()
-
-        elif key == ord("d") or key == curses.KEY_RIGHT:
-            self.right()
-
-        elif key == ord("b"):
-            self.bark()
-
-        elif key == ord("e"):
-            self.stand()
-
-        elif key == ord("x"):
-            self.sit()
-
-        elif key == ord("l"):
-            self.lie_down()
-
-        elif key == ord("p"):
-            self.pushups()
-
-        elif key == ord("h"):
-            self.wave()
-
-        elif key == ord("n"):
-            self.shake_head()
-
-        elif key == ord(" "):
-            self.stop()
-
-        elif key == ord("q") or key == 27:
-            self.running = False
-            self.status = "Quit"
-
 
 def draw_menu(stdscr, dog):
     stdscr.clear()
