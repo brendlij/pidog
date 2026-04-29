@@ -7,9 +7,10 @@ class PiDogController:
     """Initializes the PiDog with init values"""
     def __init__(self):
         self.stand_angles = [25, 25, -25, -25, 70, -45, -70, 45]
-
+        self.sit_angles = [30, 30, -30, -30, 80, -45, -80, 45]
+        
         self.dog = Pidog(  
-            leg_init_angles=self.stand_angles,
+            leg_init_angles=self.sit_angles,
             head_init_angles=[2, 2, -25],
             tail_init_angle=[0]
         )
@@ -17,6 +18,15 @@ class PiDogController:
         sleep(0.5)
         self.running = True
         self.status = "Bereit"
+        
+        
+        
+    def go_home(self, pose="stand"):
+        if pose == "stand":
+            self.stand()
+        elif pose == "sit":
+            self.sit()
+    
     """Dog Lies down"""
     def lie_down(self):
         self.status = "Lie down"
@@ -30,14 +40,20 @@ class PiDogController:
     def walkf(self):
         self.status = "Forward"
         self.dog.do_action("forward", step_count=3, speed=98)
+        self.dog.wait_all_done()
+        self.go_home("stand")
 
     def walkb(self):
         self.status = "Backward"
         self.dog.do_action("backward", step_count=3, speed=98)
+        self.dog.wait_all_done()
+        self.go_home("stand")
+
 
     def sit(self):
         self.status = "Sit"
-        self.dog.do_action("sit", step_count=1, speed=60)
+        self.dog.legs_move([self.sit_angles], immediately=True, speed=80)
+        self.dog.wait_legs_done()
 
     def doze_off(self):
         self.status = "Doze off"
@@ -46,11 +62,15 @@ class PiDogController:
     def left(self):
         self.status = "Turn left"
         self.dog.do_action("turn_left", step_count=1, speed=120)
-
+        self.dog.wait_all_done()
+        self.go_home("stand")
+        
     def right(self):
         self.status = "Turn right"
         self.dog.do_action("turn_right", step_count=1, speed=120)
-
+        self.dog.wait_all_done()
+        self.go_home("stand")
+        
     def bark(self):
         self.status = "Bark"
         self.dog.do_action("head_bark", step_count=1, speed=100)
@@ -59,29 +79,29 @@ class PiDogController:
 
     def pushups(self):
         self.status = "Push ups"
-        self.dog.do_action("push_up", step_count=4, speed=80)
+        self.dog.do_action("push_up", step_count=4, speed=50)
 
     def wave(self):
         self.status = "Wave"
 
-        stand = self.stand_angles
+        sit = self.sit_angles
 
-        paw_up = [10, -35, -25, -25, 70, -45, -70, 45]
-        paw_left = [10, -10, -25, -25, 70, -45, -70, 45]
-        paw_right = [10, -55, -25, -25, 70, -45, -70, 45]
+        paw_up = [10, -35, -30, -30, 80, -45, -80, 45]
+        paw_left = [10, -10, -30, -30, 80, -45, -80, 45]
+        paw_right = [10, -55, -30, -30, 80, -45, -80, 45]
 
-        self.dog.legs_move([stand], immediately=True, speed=80)
+        self.dog.legs_move([sit], immediately=True, speed=80)
         self.dog.wait_legs_done()
 
         for _ in range(3):
             self.dog.legs_move(
                 [paw_up, paw_left, paw_up, paw_right],
                 immediately=False,
-                speed=50
+                speed=80
             )
 
         self.dog.wait_legs_done()
-        self.dog.legs_move([stand], immediately=True, speed=80)
+        self.go_home("sit")
 
     def shake_head(self, times=3, speed=100, angle=20):
         self.status = "Smooth shake head"
