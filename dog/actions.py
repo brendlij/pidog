@@ -14,16 +14,114 @@ class PiDogActions:
         self.sit_angles = [30, 30, -30, -30, 80, -45, -80, 45]
 
         self.led_idle()
-        # Track a simple head pitch state for manual forward/back control.
+        # Track simple head roll/pitch state for manual control.
         initial_pitch = -25
+        initial_roll = 0
         try:
             init = getattr(self.dog, "head_init_angles", None)
             if init and len(init) >= 3:
+                initial_roll = int(init[1])
                 initial_pitch = int(init[2])
         except Exception:
-            logger.debug("Could not read head_init_angles from dog, using default")
+            logger.debug("Could not read head_init_angles from dog, using defaults")
 
         self.head_pitch = initial_pitch
+        self.head_roll = initial_roll
+
+    def _get_actual_head_pitch(self):
+        """Try to read the current head pitch from the underlying dog object.
+
+        Falls back to the internal `head_pitch` state if no real value is found.
+        """
+        candidates = [
+            "headData",
+            "headAngles",
+            "head_angle",
+            "head_angles",
+            "head_init_angles",
+            "head_init",
+        ]
+
+        for name in candidates:
+            try:
+                value = getattr(self.dog, name)
+            except Exception:
+                continue
+
+            if value is None:
+                continue
+
+            # If it's a sequence prefer the third element (pitch)
+            if isinstance(value, (list, tuple)):
+                if len(value) >= 3:
+                    try:
+                        return int(value[2])
+                    except Exception:
+                        continue
+                if len(value) == 1:
+                    try:
+                        return int(value[0])
+                    except Exception:
+                        continue
+
+            # If it's a scalar number use it
+            if isinstance(value, (int, float)):
+                try:
+                    return int(value)
+                except Exception:
+                    continue
+
+        # Fallback to stored state
+        try:
+            return int(getattr(self, "head_pitch", -25))
+        except Exception:
+            return -25
+
+    def _get_actual_head_roll(self):
+        """Try to read the current head roll from the underlying dog object.
+
+        Falls back to the internal `head_roll` state if no real value is found.
+        """
+        candidates = [
+            "headData",
+            "headAngles",
+            "head_angle",
+            "head_angles",
+            "head_init_angles",
+            "head_init",
+        ]
+
+        for name in candidates:
+            try:
+                value = getattr(self.dog, name)
+            except Exception:
+                continue
+
+            if value is None:
+                continue
+
+            if isinstance(value, (list, tuple)):
+                if len(value) >= 3:
+                    try:
+                        return int(value[1])
+                    except Exception:
+                        continue
+                if len(value) == 2:
+                    try:
+                        return int(value[0])
+                    except Exception:
+                        continue
+
+            if isinstance(value, (int, float)):
+                try:
+                    return int(value)
+                except Exception:
+                    continue
+
+        try:
+            return int(getattr(self, "head_roll", 0))
+        except Exception:
+            return 0
 
     # ---------- LEDs ----------
 
@@ -289,13 +387,15 @@ class PiDogActions:
         try:
             self.led_cute()
 
-            # Preserve current forward/back pitch when tilting left/right.
-            roll = 15
-            pitch = int(getattr(self, "head_pitch", -25))
-            self.dog.head_move([[0, roll, pitch]], immediately=True, speed=40)
+            # Adjust roll relative to current roll, preserve pitch
+            current_roll = self._get_actual_head_roll()
+            pitch = self._get_actual_head_pitch()
+            new_roll = max(min(current_roll + 15, 60), -60)
+            self.head_roll = new_roll
+            self.dog.head_move([[0, int(new_roll), int(pitch)]], immediately=True, speed=40)
             self.dog.wait_head_done()
 
-            logger.info("Action finished: Tilting head left")
+            logger.info("Action finished: Tilting head left to roll=%s", new_roll)
 
         except Exception:
             logger.exception("Action failed: Tilting head left")
@@ -308,13 +408,15 @@ class PiDogActions:
         try:
             self.led_cute()
 
-            # Preserve current forward/back pitch when tilting left/right.
-            roll = -15
-            pitch = int(getattr(self, "head_pitch", -25))
-            self.dog.head_move([[0, roll, pitch]], immediately=True, speed=40)
+            # Adjust roll relative to current roll, preserve pitch
+            current_roll = self._get_actual_head_roll()
+            pitch = self._get_actual_head_pitch()
+            new_roll = max(min(current_roll - 15, 60), -60)
+            self.head_roll = new_roll
+            self.dog.head_move([[0, int(new_roll), int(pitch)]], immediately=True, speed=40)
             self.dog.wait_head_done()
 
-            logger.info("Action finished: Tilting head right")
+            logger.info("Action finished: Tilting head right to roll=%s", new_roll)
 
         except Exception:
             logger.exception("Action failed: Tilting head right")
@@ -347,10 +449,11 @@ class PiDogActions:
         """
         self.status = "Head forward"
         try:
-            self.head_pitch = min(self.head_pitch + int(step), 60)
+            current = self._get_actual_head_pitch()
+            self.head_pitch = min(current + int(step), 60)
             self.dog.head_move([[0, 0, int(self.head_pitch)]], immediately=True, speed=50)
             self.dog.wait_head_done()
-            logger.info("Head moved forward to pitch=%s", self.head_pitch)
+            logger.info("Head moved forward to pitch=%s (was %s)", self.head_pitch, current)
         except Exception:
             logger.exception("Head forward failed")
             self.status = "Error during Head forward"
@@ -359,10 +462,11 @@ class PiDogActions:
         """Move the head backward by decreasing pitch (degrees)."""
         self.status = "Head backward"
         try:
-            self.head_pitch = max(self.head_pitch - int(step), -60)
+            current = self._get_actual_head_pitch()
+            self.head_pitch = max(current - int(step), -60)
             self.dog.head_move([[0, 0, int(self.head_pitch)]], immediately=True, speed=50)
             self.dog.wait_head_done()
-            logger.info("Head moved backward to pitch=%s", self.head_pitch)
+            logger.info("Head moved backward to pitch=%s (was %s)", self.head_pitch, current)
         except Exception:
             logger.exception("Head backward failed")
             self.status = "Error during Head backward"
