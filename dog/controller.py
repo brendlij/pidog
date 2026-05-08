@@ -6,6 +6,7 @@ import threading
 from pidog import Pidog
 
 from dog.actions import PiDogActions
+from sensors.imu import IMUSensor
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ class PiDogController:
         sleep(0.5)
 
         self.actions = PiDogActions(self.dog)
+        self.imu = IMUSensor(self.dog)
         self.running = True
 
         self.setup_keybindings()
@@ -32,6 +34,36 @@ class PiDogController:
     @property
     def status(self):
         return self.actions.status
+
+    @property
+    def accel_data(self):
+        return self.imu.read_accel_raw()
+
+    @property
+    def accel_g_data(self):
+        return self.imu.read_accel_g()
+
+    @property
+    def gyro_data(self):
+        return self.imu.read_gyro_raw()
+
+    def log_imu(self):
+        ax, ay, az = self.accel_data
+        gx, gy, gz = self.gyro_data
+        agx, agy, agz = self.accel_g_data
+
+        logger.info(
+            "IMU accel_raw=(%d, %d, %d) accel_g=(%.3f, %.3f, %.3f) gyro_raw=(%d, %d, %d)",
+            ax,
+            ay,
+            az,
+            agx,
+            agy,
+            agz,
+            gx,
+            gy,
+            gz,
+        )
 
     def setup_keybindings(self):
         self.keybindings = {

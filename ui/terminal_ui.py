@@ -27,6 +27,10 @@ def safe_addstr(stdscr, y, x, text):
 def draw_menu(stdscr, dog):
     stdscr.clear()
 
+    ax, ay, az = dog.accel_data
+    gx, gy, gz = dog.gyro_data
+    agx, agy, agz = dog.accel_g_data
+
     lines_left = [
         "╔══════════════════════════════════════╗",
         "║           PiDog Controller           ║",
@@ -71,6 +75,11 @@ def draw_menu(stdscr, dog):
         "Control",
         "  Space      Stop",
         "  Q / ESC    Quit",
+        "",
+        "IMU",
+        f"  Accel raw  X:{ax:6d} Y:{ay:6d} Z:{az:6d}",
+        f"  Gyro  raw  X:{gx:6d} Y:{gy:6d} Z:{gz:6d}",
+        f"  Accel g    X:{agx:6.2f} Y:{agy:6.2f} Z:{agz:6.2f}",
         "",
         f"Status: {dog.status}",
     ]

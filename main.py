@@ -1,5 +1,4 @@
 import curses
-
 from core.logger import setup_logging
 from app import main
 

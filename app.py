@@ -1,5 +1,5 @@
 import curses
-from time import sleep
+from time import monotonic, sleep
 import logging
 
 from dog.controller import PiDogController
@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 
 def main(stdscr):
     dog = PiDogController()
+    last_imu_log_ts = 0.0
 
     curses.cbreak()
     curses.noecho()
@@ -25,6 +26,12 @@ def main(stdscr):
     try:
         while dog.running:
             draw_menu(stdscr, dog)
+
+            now = monotonic()
+
+            if now - last_imu_log_ts >= 1.0:
+                dog.log_imu()
+                last_imu_log_ts = now
 
             key = stdscr.getch()
 
