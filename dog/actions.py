@@ -14,6 +14,16 @@ class PiDogActions:
         self.sit_angles = [30, 30, -30, -30, 80, -45, -80, 45]
 
         self.led_idle()
+        # Track a simple head pitch state for manual forward/back control.
+        initial_pitch = -25
+        try:
+            init = getattr(self.dog, "head_init_angles", None)
+            if init and len(init) >= 3:
+                initial_pitch = int(init[2])
+        except Exception:
+            logger.debug("Could not read head_init_angles from dog, using default")
+
+        self.head_pitch = initial_pitch
 
     # ---------- LEDs ----------
 
@@ -307,6 +317,35 @@ class PiDogActions:
             step_count=4,
             speed=60
         )
+
+    def head_forward(self, step=5):
+        """Move the head forward by increasing pitch (degrees).
+
+        This keeps a simple internal pitch state and issues an absolute
+        head_move using that pitch. The method clamps values to a
+        sensible range to avoid extreme angles.
+        """
+        self.status = "Head forward"
+        try:
+            self.head_pitch = min(self.head_pitch + int(step), 60)
+            self.dog.head_move([[0, 0, int(self.head_pitch)]], immediately=True, speed=50)
+            self.dog.wait_head_done()
+            logger.info("Head moved forward to pitch=%s", self.head_pitch)
+        except Exception:
+            logger.exception("Head forward failed")
+            self.status = "Error during Head forward"
+
+    def head_backward(self, step=5):
+        """Move the head backward by decreasing pitch (degrees)."""
+        self.status = "Head backward"
+        try:
+            self.head_pitch = max(self.head_pitch - int(step), -60)
+            self.dog.head_move([[0, 0, int(self.head_pitch)]], immediately=True, speed=50)
+            self.dog.wait_head_done()
+            logger.info("Head moved backward to pitch=%s", self.head_pitch)
+        except Exception:
+            logger.exception("Head backward failed")
+            self.status = "Error during Head backward"
 
     def wag_tail(self):
         self.run_action(

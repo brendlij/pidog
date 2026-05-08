@@ -159,6 +159,8 @@ class PiDogController:
             ord("k"): self.actions.tilting_head_right,
             ord("i"): self.actions.tilting_head,
             ord("u"): self.actions.head_up_down,
+            ord(","): self.actions.head_backward,
+            ord("."): self.actions.head_forward,
             ord("m"): self.actions.wag_tail,
             ord("c"): self.actions.act_cute,
 

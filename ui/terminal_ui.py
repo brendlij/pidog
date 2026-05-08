@@ -64,6 +64,8 @@ def draw_menu(stdscr, dog):
 
     lines_right = [
         "Head",
+        "  ,          Head backward",
+        "  .          Head forward",
         "  J          Tilt head left",
         "  K          Tilt head right",
         "  I          Tilt head",
