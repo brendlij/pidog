@@ -1,1 +1,3 @@
-# Pidog Repo for Julian Brendlin
+# PIDOG by Sundofunders
+
+### Azubi Project #2 by Julian Brendlin.
