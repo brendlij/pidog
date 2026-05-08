@@ -1,3 +1,3 @@
-# PIDOG by Sundofunders
+# PIDOG BY SUNFOUNDERS
 
-### Azubi Project #2 by Julian Brendlin.
+## AZUBI PROJEKT Julian Brendlin
