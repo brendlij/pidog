@@ -283,22 +283,42 @@ class PiDogActions:
         self.led_idle()
 
     def tilting_head_left(self):
-        self.run_action(
-            status="Tilting head left",
-            action_name="tilting_head_left",
-            led_func=self.led_cute,
-            step_count=1,
-            speed=40
-        )
+        self.status = "Tilting head left"
+        logger.info("Action started: Tilting head left")
+
+        try:
+            self.led_cute()
+
+            # Preserve current forward/back pitch when tilting left/right.
+            roll = 15
+            pitch = int(getattr(self, "head_pitch", -25))
+            self.dog.head_move([[0, roll, pitch]], immediately=True, speed=40)
+            self.dog.wait_head_done()
+
+            logger.info("Action finished: Tilting head left")
+
+        except Exception:
+            logger.exception("Action failed: Tilting head left")
+            self.status = "Error during Tilting head left"
 
     def tilting_head_right(self):
-        self.run_action(
-            status="Tilting head right",
-            action_name="tilting_head_right",
-            led_func=self.led_cute,
-            step_count=1,
-            speed=40
-        )
+        self.status = "Tilting head right"
+        logger.info("Action started: Tilting head right")
+
+        try:
+            self.led_cute()
+
+            # Preserve current forward/back pitch when tilting left/right.
+            roll = -15
+            pitch = int(getattr(self, "head_pitch", -25))
+            self.dog.head_move([[0, roll, pitch]], immediately=True, speed=40)
+            self.dog.wait_head_done()
+
+            logger.info("Action finished: Tilting head right")
+
+        except Exception:
+            logger.exception("Action failed: Tilting head right")
+            self.status = "Error during Tilting head right"
 
     def tilting_head(self):
         self.run_action(
