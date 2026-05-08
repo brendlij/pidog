@@ -71,8 +71,6 @@ def draw_menu(stdscr, dog):
         "  I          Tilt head",
         "",
         "Custom Poses",
-        "Face",
-        "  F          Toggle face follow",
         "  R          Ready pose",
         "  Y          Chill pose",
         "",
