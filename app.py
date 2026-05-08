@@ -26,6 +26,7 @@ def main(stdscr):
     try:
         while dog.running:
             draw_menu(stdscr, dog)
+            dog.tick_idle_mode()
 
             now = monotonic()
 

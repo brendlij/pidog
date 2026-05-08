@@ -1,12 +1,15 @@
 import curses
 import logging
-from time import sleep
-import threading
+from time import monotonic, sleep
+from threading import Lock, Thread
 
 from pidog import Pidog
 
 from dog.actions import PiDogActions
+from dog.idle_modes import IdleModeManager
 from sensors.imu import IMUSensor
+from sensors.sdd import SDDSensor
+from sensors.dual_touch import DualTouchSensor
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +27,13 @@ class PiDogController:
         sleep(0.5)
 
         self.actions = PiDogActions(self.dog)
+        self.idle_modes = IdleModeManager(self.actions)
         self.imu = IMUSensor(self.dog)
+        self.sdd = SDDSensor(self.dog)
+        self.dual_touch = DualTouchSensor(self.dog)
         self.running = True
+        self._action_thread = None
+        self._action_lock = Lock()
 
         self.setup_keybindings()
 
@@ -47,13 +55,27 @@ class PiDogController:
     def gyro_data(self):
         return self.imu.read_gyro_raw()
 
+    @property
+    def sound_direction(self):
+        return self.sdd.read_direction()
+
+    @property
+    def sound_detected(self):
+        return self.sdd.is_detected()
+
+    @property
+    def idle_mode_name(self):
+        return self.idle_modes.active_name
+
     def log_imu(self):
         ax, ay, az = self.accel_data
         gx, gy, gz = self.gyro_data
         agx, agy, agz = self.accel_g_data
+        detected = self.sound_detected
+        direction = self.sound_direction
 
         logger.info(
-            "IMU accel_raw=(%d, %d, %d) accel_g=(%.3f, %.3f, %.3f) gyro_raw=(%d, %d, %d)",
+            "IMU accel_raw=(%d, %d, %d) accel_g=(%.3f, %.3f, %.3f) gyro_raw=(%d, %d, %d) sdd_detected=%s sdd_dir=%d",
             ax,
             ay,
             az,
@@ -63,7 +85,47 @@ class PiDogController:
             gx,
             gy,
             gz,
+            detected,
+            direction,
         )
+
+    def set_idle_mode(self, mode_name):
+        if self.idle_modes.enable(mode_name):
+            self.actions.status = f"Idle mode: {mode_name}"
+
+    def disable_idle_mode(self):
+        self.idle_modes.disable()
+        self.actions.status = "Idle mode: off"
+
+    def tick_idle_mode(self):
+        self.idle_modes.tick(monotonic())
+
+    def _is_action_running(self):
+        with self._action_lock:
+            return self._action_thread is not None and self._action_thread.is_alive()
+
+    def _run_action_async(self, action_name, action_callable):
+        if self._is_action_running():
+            logger.info("Action ignored because another action is still running: %s", action_name)
+            return False
+
+        def worker():
+            try:
+                action_callable()
+            except Exception:
+                logger.exception("Action failed: %s", action_name)
+                self.actions.status = f"Error during {action_name}"
+            finally:
+                with self._action_lock:
+                    self._action_thread = None
+
+        thread = Thread(target=worker, daemon=True)
+
+        with self._action_lock:
+            self._action_thread = thread
+
+        thread.start()
+        return True
 
     def setup_keybindings(self):
         self.keybindings = {
@@ -103,6 +165,11 @@ class PiDogController:
             ord("r"): self.actions.ready_pose,
             ord("y"): self.actions.chill_pose,
 
+            ord("1"): lambda: self.set_idle_mode("calm"),
+            ord("2"): lambda: self.set_idle_mode("curious"),
+            ord("3"): lambda: self.set_idle_mode("sleepy"),
+            ord("0"): self.disable_idle_mode,
+
             ord(" "): self.actions.stop,
         }
 
@@ -114,13 +181,18 @@ class PiDogController:
             logger.info("Quit requested")
             return
 
+        if key == ord(" "):
+            self.actions.stop()
+            return
+
         action = self.keybindings.get(key)
 
         if action:
             logger.info("Key pressed: %s", key)
 
             try:
-                action()
+                if key != ord(" "):
+                    self._run_action_async(str(key), action)
             except Exception:
                 logger.exception("Action failed for key: %s", key)
                 self.actions.status = "Fehler"
@@ -139,6 +211,12 @@ class PiDogController:
             self.dog.body_stop()
         except Exception:
             logger.exception("Body stop cleanup failed")
+
+        with self._action_lock:
+            action_thread = self._action_thread
+
+        if action_thread and action_thread.is_alive():
+            action_thread.join(timeout=1.0)
 
         try:
             self.dog.close()
