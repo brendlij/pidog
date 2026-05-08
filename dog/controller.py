@@ -10,6 +10,7 @@ from dog.idle_modes import IdleModeManager
 from sensors.imu import IMUSensor
 from sensors.sdd import SDDSensor
 from sensors.dual_touch import DualTouchSensor
+from sensors.face_detection import FaceDetectionSensor
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,10 @@ class PiDogController:
         self.imu = IMUSensor(self.dog)
         self.sdd = SDDSensor(self.dog)
         self.dual_touch = DualTouchSensor(self.dog)
+        self.face_detector = FaceDetectionSensor(self.dog)
+        self.face_follow_enabled = False
+        self._face_thread = Thread(target=self._face_loop, daemon=True)
+        self._face_thread.start()
         self.running = True
         self._action_thread = None
         self._action_lock = Lock()
@@ -161,6 +166,7 @@ class PiDogController:
             ord("u"): self.actions.head_up_down,
             ord(","): self.actions.head_backward,
             ord("."): self.actions.head_forward,
+            ord("F"): self._toggle_face_follow,
             ord("m"): self.actions.wag_tail,
             ord("c"): self.actions.act_cute,
 
@@ -194,7 +200,14 @@ class PiDogController:
 
             try:
                 if key != ord(" "):
-                    self._run_action_async(str(key), action)
+                    # if action is a controller method (toggle), call directly
+                    if getattr(action, "__self__", None) is self:
+                        try:
+                            action()
+                        except Exception:
+                            logger.exception("Controller action failed for key: %s", key)
+                    else:
+                        self._run_action_async(str(key), action)
             except Exception:
                 logger.exception("Action failed for key: %s", key)
                 self.actions.status = "Fehler"
@@ -225,4 +238,41 @@ class PiDogController:
         except Exception:
             logger.exception("Dog close cleanup failed")
 
+        # ensure face follow thread stops
+        self.face_follow_enabled = False
+
         logger.info("Cleanup finished")
+
+    def _toggle_face_follow(self):
+        self.face_follow_enabled = not self.face_follow_enabled
+        self.actions.status = f"Face follow: {'on' if self.face_follow_enabled else 'off'}"
+        logger.info("Face follow toggled: %s", self.face_follow_enabled)
+
+    def _face_loop(self):
+        """Background loop that reacts to detected faces when enabled."""
+        while self.running:
+            try:
+                if self.face_follow_enabled and self.face_detector:
+                    if self.face_detector.is_detected():
+                        dir = self.face_detector.direction()
+                        if dir == 'left':
+                            # tilt left slightly
+                            self._run_action_async('face_tilt_left', self.actions.tilting_head_left)
+                        elif dir == 'right':
+                            # tilt right slightly
+                            self._run_action_async('face_tilt_right', self.actions.tilting_head_right)
+                        elif dir == 'center':
+                            # move head forward a bit and possibly step forward
+                            self._run_action_async('face_forward', lambda: self.actions.head_forward(step=5))
+                            # if face is centered, take a cautious step forward
+                            data = self.face_detector.read()
+                            if data.get('human_w', 0) < 80:
+                                self._run_action_async('face_step', self.actions.walk_forward)
+                    else:
+                        # no face: do nothing
+                        pass
+
+            except Exception:
+                logger.exception("Face loop error")
+
+            sleep(0.5)
