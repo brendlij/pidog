@@ -1,85 +1,113 @@
 import curses
-from math import sqrt
-from time import monotonic, sleep
 import logging
+import math
+from time import monotonic, sleep
 
 from core.logger import setup_logging
 from dog.controller import PiDogController
-from ui.terminal_ui import draw_menu
 
 logger = logging.getLogger(__name__)
 
-LIFT_ACCEL_LOW = 0.75
-LIFT_ACCEL_HIGH = 1.25
-LIFT_HOLD_SECONDS = 0.35
-LIFT_BARK_COOLDOWN = 5.0
+# Default thresholds (g)
+DEFAULT_LOW = 0.75
+DEFAULT_HIGH = 1.25
+DEFAULT_HOLD = 0.35
+DEFAULT_COOLDOWN = 5.0
 
 
-def main(stdscr):
+def run_curses(stdscr):
+    setup_logging()
     dog = PiDogController()
-    last_imu_log_ts = 0.0
-    lift_out_of_range_since = None
-    last_lift_bark_ts = -LIFT_BARK_COOLDOWN
+
+    low = DEFAULT_LOW
+    high = DEFAULT_HIGH
+    hold = DEFAULT_HOLD
+    cooldown = DEFAULT_COOLDOWN
+
+    lift_start = None
+    last_bark = -cooldown
 
     curses.cbreak()
     curses.noecho()
-
-    try:
-        curses.curs_set(0)
-    except curses.error:
-        logger.warning("Could not hide cursor")
-
     stdscr.nodelay(True)
     stdscr.keypad(True)
 
     try:
+        curses.curs_set(0)
+    except curses.error:
+        pass
+
+    try:
         while dog.running:
-            draw_menu(stdscr, dog)
-            dog.tick_idle_mode()
-
-            now = monotonic()
-
-            if now - last_imu_log_ts >= 1.0:
-                dog.log_imu()
-                last_imu_log_ts = now
+            stdscr.clear()
 
             ax, ay, az = dog.accel_g_data
-            accel_magnitude = sqrt(ax * ax + ay * ay + az * az)
+            mag = math.sqrt(ax * ax + ay * ay + az * az)
+            now = monotonic()
 
-            if accel_magnitude < LIFT_ACCEL_LOW or accel_magnitude > LIFT_ACCEL_HIGH:
-                if lift_out_of_range_since is None:
-                    lift_out_of_range_since = now
-                elif (
-                    now - lift_out_of_range_since >= LIFT_HOLD_SECONDS
-                    and now - last_lift_bark_ts >= LIFT_BARK_COOLDOWN
-                ):
-                    logger.info(
-                        "Lift detected via accel magnitude %.3f, triggering bark",
-                        accel_magnitude,
-                    )
+            triggered = False
+            if mag < low or mag > high:
+                if lift_start is None:
+                    lift_start = now
+                elif now - lift_start >= hold and now - last_bark >= cooldown:
+                    triggered = True
                     dog.handle_key(ord("b"))
-                    last_lift_bark_ts = now
-                    lift_out_of_range_since = None
+                    last_bark = now
+                    lift_start = None
             else:
-                lift_out_of_range_since = None
+                lift_start = None
 
+            # Display
+            stdscr.addstr(0, 0, "PiDog IMU Lift Tester")
+            stdscr.addstr(2, 0, f"Accel g:  ax={ax:6.3f}  ay={ay:6.3f}  az={az:6.3f}")
+            stdscr.addstr(3, 0, f"Magnitude: {mag:6.3f} g")
+            stdscr.addstr(5, 0, "Thresholds (use keys to adjust):")
+            stdscr.addstr(6, 0, f"  Low  (a/z): {low:5.3f} g")
+            stdscr.addstr(7, 0, f"  High (s/x): {high:5.3f} g")
+            stdscr.addstr(8, 0, f"  Hold (d/c): {hold:5.3f} s")
+            stdscr.addstr(9, 0, f"  Cool (f/v): {cooldown:5.1f} s")
+
+            status = "TRIGGERED!" if triggered else "idle"
+            stdscr.addstr(11, 0, f"Status: {status}")
+            stdscr.addstr(13, 0, "Keys: q=quit  r=reset thresholds")
+
+            stdscr.refresh()
+
+            # Input
             key = stdscr.getch()
-
             if key != -1:
-                dog.handle_key(key)
+                if key in (ord("q"), 27):
+                    dog.running = False
+                    break
+                if key == ord("a"):
+                    low = max(0.0, low - 0.05)
+                if key == ord("z"):
+                    low = low + 0.05
+                if key == ord("s"):
+                    high = max(0.0, high - 0.05)
+                if key == ord("x"):
+                    high = high + 0.05
+                if key == ord("d"):
+                    hold = max(0.05, hold - 0.05)
+                if key == ord("c"):
+                    hold = hold + 0.05
+                if key == ord("f"):
+                    cooldown = max(0.0, cooldown - 0.5)
+                if key == ord("v"):
+                    cooldown = cooldown + 0.5
+                if key == ord("r"):
+                    low = DEFAULT_LOW
+                    high = DEFAULT_HIGH
+                    hold = DEFAULT_HOLD
+                    cooldown = DEFAULT_COOLDOWN
 
             sleep(0.05)
 
     except KeyboardInterrupt:
-        logger.info("KeyboardInterrupt received")
-
-    except Exception:
-        logger.exception("Main loop crashed")
-
+        pass
     finally:
         dog.cleanup()
 
 
 if __name__ == "__main__":
-    setup_logging()
-    curses.wrapper(main)
+    curses.wrapper(run_curses)

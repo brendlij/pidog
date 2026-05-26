@@ -306,7 +306,6 @@ class PiDogActions:
             sleep(1)
 
             self.dog.wait_all_done()
-            self.go_home("sit")
 
             logger.info("Action finished: Bark")
 
