@@ -1,0 +1,560 @@
+diff --git a/app.py b/app.py
+index 6e4809c..23caf79 100644
+--- a/app.py
++++ b/app.py
+@@ -8,8 +8,10 @@ from ui.terminal_ui import draw_menu
+ logger = logging.getLogger(__name__)
+ 
+ 
+-def main(stdscr):
++def main(stdscr, start_idle=None):
+     dog = PiDogController()
++    if start_idle:
++        dog.set_idle_mode(start_idle)
+     last_imu_log_ts = 0.0
+ 
+     curses.cbreak()
+diff --git a/dog/controller.py b/dog/controller.py
+index 3da2ca2..44dba90 100644
+--- a/dog/controller.py
++++ b/dog/controller.py
+@@ -6,7 +6,7 @@ from threading import Lock, Thread
+ from pidog import Pidog
+ 
+ from dog.actions import PiDogActions
+-from dog.idle_modes import IdleModeManager
++from dog.idle_modes import IdleContext, IdleModeManager
+ from sensors.imu import IMUSensor
+ from sensors.sdd import SDDSensor
+ from sensors.dual_touch import DualTouchSensor
+@@ -27,13 +27,22 @@ class PiDogController:
+         sleep(0.5)
+ 
+         self.actions = PiDogActions(self.dog)
+-        self.idle_modes = IdleModeManager(self.actions)
+         self.imu = IMUSensor(self.dog)
+         self.sdd = SDDSensor(self.dog)
+         self.dual_touch = DualTouchSensor(self.dog)
+         self.running = True
+         self._action_thread = None
+         self._action_lock = Lock()
++        self.idle_modes = IdleModeManager(
++            IdleContext(
++                actions=self.actions,
++                imu=self.imu,
++                touch=self.dual_touch,
++                sdd=self.sdd,
++                run_async=self._run_action_async,
++                is_busy=self._is_action_running,
++            )
++        )
+ 
+         self.setup_keybindings()
+ 
+@@ -170,6 +179,7 @@ class PiDogController:
+             ord("1"): lambda: self.set_idle_mode("calm"),
+             ord("2"): lambda: self.set_idle_mode("curious"),
+             ord("3"): lambda: self.set_idle_mode("sleepy"),
++            ord("4"): lambda: self.set_idle_mode("messe"),
+             ord("0"): self.disable_idle_mode,
+ 
+             ord(" "): self.actions.stop,
+@@ -190,6 +200,9 @@ class PiDogController:
+         action = self.keybindings.get(key)
+ 
+         if action:
++            # A manual command pauses the idle mode for a while.
++            self.idle_modes.pause_for(10.0, monotonic())
++
+             logger.info("Key pressed: %s", key)
+ 
+             try:
+diff --git a/dog/idle_modes.py b/dog/idle_modes.py
+index 26f7f86..49fa9ce 100644
+--- a/dog/idle_modes.py
++++ b/dog/idle_modes.py
+@@ -1,28 +1,41 @@
+ import logging
++import random
++from dataclasses import dataclass
++from typing import Callable, Optional
+ 
+ 
+ logger = logging.getLogger(__name__)
+ 
+ 
++@dataclass
++class IdleContext:
++    """Everything an idle mode needs from the controller."""
++
++    actions: object                      # PiDogActions
++    imu: object = None                   # IMUSensor
++    touch: object = None                 # DualTouchSensor
++    sdd: object = None                   # SDDSensor
++    run_async: Optional[Callable] = None  # (name, callable) -> bool, False if busy
++    is_busy: Optional[Callable] = None    # () -> bool
++
++
+ class BaseIdleMode:
+-    """Base skeleton for an idle mode strategy."""
++    """Base class for an idle mode strategy."""
+ 
+     name = "base"
+     interval_sec = 3.0
+ 
+-    def __init__(self, actions):
+-        self.actions = actions
++    def __init__(self, ctx):
++        self.ctx = ctx
++        self.actions = ctx.actions
+ 
+     def on_enter(self):
+-        """Hook called when mode gets activated."""
+         pass
+ 
+     def on_exit(self):
+-        """Hook called when mode gets deactivated."""
+         pass
+ 
+     def tick(self):
+-        """Hook called periodically while mode is active."""
+         pass
+ 
+ 
+@@ -32,10 +45,6 @@ class CalmIdleMode(BaseIdleMode):
+     name = "calm"
+     interval_sec = 4.0
+ 
+-    def tick(self):
+-        # Intentionally empty skeleton.
+-        pass
+-
+ 
+ class CuriousIdleMode(BaseIdleMode):
+     """Placeholder for curious idle behavior."""
+@@ -43,10 +52,6 @@ class CuriousIdleMode(BaseIdleMode):
+     name = "curious"
+     interval_sec = 2.5
+ 
+-    def tick(self):
+-        # Intentionally empty skeleton.
+-        pass
+-
+ 
+ class SleepyIdleMode(BaseIdleMode):
+     """Placeholder for sleepy idle behavior."""
+@@ -54,22 +59,342 @@ class SleepyIdleMode(BaseIdleMode):
+     name = "sleepy"
+     interval_sec = 5.0
+ 
++
++class MesseIdleMode(BaseIdleMode):
++    """Stationary trade-fair mode. The dog never walks.
++
++    - Lifted (accelerometer leaves the 1 g band): Superman pose until put down.
++    - Touched: growl or bark (a stroke front-to-back/back-to-front gets happy).
++    - Otherwise, now and then: sleep (snoring), look around, wag tail, yawn-stretch.
++    """
++
++    name = "messe"
++    interval_sec = 0.1          # poll fast; own timing below
++
++    # --- Lift detection (g) ---
++    LIFT_LOW = 0.75
++    LIFT_HIGH = 1.25
++    LIFT_HOLD = 0.25            # s outside the band before it counts as lifted
++    SUPERMAN_MIN_SEC = 3.0      # keep pose at least this long
++    SUPERMAN_MAX_SEC = 25.0     # safety timeout if "put down" is never detected
++    SETDOWN_STILL_SEC = 0.8     # still (~1 g) this long after the min time = put down
++
++    # --- Touch ---
++    TOUCH_COOLDOWN = 3.0
++    BARK_CHANCE = 0.5           # tap: bark, otherwise growl
++
++    # --- Random idle behaviour ---
++    IDLE_MIN_SEC = 12.0
++    IDLE_MAX_SEC = 30.0
++    SLEEP_MIN_SEC = 15.0
++    SLEEP_MAX_SEC = 40.0
++    SNORE_EVERY_SEC = 7.0
++
++    # Superman: front legs stretched forward, rear folded (angles from the
++    # library's lie_with_hands_out; tune on the real dog if you want rear legs out).
++    SUPERMAN_LEGS = [-60, 60, 60, -60, 45, -45, -45, 45]
++    SUPERMAN_HEAD = [[0, 0, -30]]
++
++    def __init__(self, ctx):
++        super().__init__(ctx)
++        self._reset_state(0.0)
++
++    def _reset_state(self, now):
++        self.state = "idle"          # idle | superman | sleeping
++        self._out_since = None
++        self._state_since = now
++        self._still_since = None
++        self._next_idle_at = now + random.uniform(3.0, 8.0)
++        self._sleep_until = 0.0
++        self._next_snore_at = 0.0
++        self._last_touch_ts = -self.TOUCH_COOLDOWN
++        self._bumped = False
++        self._superman_pending = False
++        self._recover_pending = False
++
++    def on_enter(self):
++        from time import monotonic
++        self._reset_state(monotonic())
++        self._start("messe_stand", self.actions.sit)
++
++    def on_exit(self):
++        self.state = "idle"
++
++    # ------------------------------------------------------------------ helpers
++    def _busy(self):
++        return bool(self.ctx.is_busy and self.ctx.is_busy())
++
++    def _start(self, name, fn):
++        if self.ctx.run_async is None:
++            return False
++        return bool(self.ctx.run_async(name, fn))
++
++    def _magnitude(self):
++        if self.ctx.imu is None:
++            return 1.0
++        ax, ay, az = self.ctx.imu.read_accel_g()
++        return (ax * ax + ay * ay + az * az) ** 0.5
++
++    def _lift_deviation(self):
++        mag = self._magnitude()
++        return mag < self.LIFT_LOW or mag > self.LIFT_HIGH
++
++    def _read_touch(self):
++        if self.ctx.touch is None:
++            return "N"
++        return self.ctx.touch.read()
++
++    # ------------------------------------------------------------------ behaviours
++    def _superman(self):
++        a = self.actions
++        a.status = "Superman!"
++        a.set_led(style="boom", color="red", bps=2, brightness=0.8)
++        try:
++            a.dog.legs_move([self.SUPERMAN_LEGS], immediately=True, speed=80)
++            a.dog.head_move(self.SUPERMAN_HEAD, immediately=True, speed=60)
++            a.dog.wait_legs_done()
++            a.dog.wait_head_done()
++        except Exception:
++            logger.exception("Superman pose failed")
++
++    def _recover(self):
++        a = self.actions
++        a.status = "Back to sit"
++        a.sit()
++        a.led_idle()
++
++    def _sleep(self):
++        a = self.actions
++        a.status = "Sleeping"
++        a.set_led(style="breath", color="white", bps=0.5, brightness=0.2)
++        try:
++            a.do_action("lie", speed=50)
++            a.dog.speak("snoring", volume=40)
++        except Exception:
++            logger.exception("Sleep start failed")
++
++    def _snore(self):
++        try:
++            self.actions.dog.speak("snoring", volume=40)
++        except Exception:
++            logger.exception("Snore failed")
++
++    def _wake_up(self):
++        a = self.actions
++        a.status = "Waking up"
++        a.stretch()
++        a.sit()
++        a.led_idle()
++
++    def _growl(self):
++        a = self.actions
++        a.status = "Growl"
++        a.led_bark()
++        try:
++            a.dog.speak(random.choice(["growl_1", "growl_2"]), volume=80)
++            a.do_action("head_bark", speed=40)
++        except Exception:
++            logger.exception("Growl failed")
++        from time import sleep
++        sleep(1.0)
++        a.led_idle()
++
++    def _bark(self):
++        self.actions.bark()
++        self.actions.led_idle()
++
++    def _wag(self, steps=8):
++        a = self.actions
++        a.status = "Wag tail"
++        a.led_cute()
++        try:
++            a.do_action("wag_tail", step_count=steps, speed=90)
++        except Exception:
++            logger.exception("Wag failed")
++        a.led_idle()
++
++    def _tilt(self):
++        a = self.actions
++        a.status = "Tilt head"
++        try:
++            a.do_action("tilting_head", step_count=2, speed=40)
++        except Exception:
++            logger.exception("Tilt failed")
++
++    def _happy(self):
++        a = self.actions
++        a.status = "Happy"
++        a.led_cute()
++        try:
++            a.dog.speak("pant", volume=60)
++            a.dog.do_action("wag_tail", step_count=10, speed=90)
++            a.dog.do_action("tilting_head", step_count=1, speed=40)
++            a.dog.wait_all_done()
++        except Exception:
++            logger.exception("Happy failed")
++        a.led_idle()
++
++    def _look_around(self):
++        a = self.actions
++        a.status = "Look around"
++        try:
++            for yaw in (random.choice([-35, 35]), random.choice([-20, 20]), 0):
++                a.dog.head_move([[yaw, 0, -20]], immediately=True, speed=40)
++                a.dog.wait_head_done()
++        except Exception:
++            logger.exception("Look around failed")
++
++    def _random_idle(self, now):
++        choice = random.choices(
++            ["sleep", "look", "wag", "head_tilt"],
++            weights=[3, 4, 3, 2],
++        )[0]
++        logger.info("Messe idle choice: %s", choice)
++
++        if choice == "sleep":
++            if self._start("messe_sleep", self._sleep):
++                self.state = "sleeping"
++                self._state_since = now
++                self._sleep_until = now + random.uniform(self.SLEEP_MIN_SEC, self.SLEEP_MAX_SEC)
++                self._next_snore_at = now + self.SNORE_EVERY_SEC
++        elif choice == "look":
++            self._start("messe_look", self._look_around)
++        elif choice == "wag":
++            self._start("messe_wag", self._wag)
++        else:
++            self._start("messe_tilt", self._tilt)
++
++        self._next_idle_at = now + random.uniform(self.IDLE_MIN_SEC, self.IDLE_MAX_SEC)
++
++    # ------------------------------------------------------------------ main tick
+     def tick(self):
+-        # Intentionally empty skeleton.
+-        pass
++        from time import monotonic
++        now = monotonic()
++
++        # 1) Lift detection works in every state, including during an action.
++        if self.state != "superman":
++            if self._lift_deviation():
++                if self._out_since is None:
++                    self._out_since = now
++                elif now - self._out_since >= self.LIFT_HOLD:
++                    self._enter_superman(now)
++                    return
++            else:
++                self._out_since = None
++        else:
++            self._tick_superman(now)
++            return
++
++        # 2) Touch.
++        touch = self._read_touch()
++        if touch != "N" and now - self._last_touch_ts >= self.TOUCH_COOLDOWN and not self._busy():
++            self._last_touch_ts = now
++            self._react_to_touch(touch, now)
++            return
++
++        if self._busy():
++            return
++
++        if self._recover_pending:
++            self._recover_pending = not self._start("messe_recover", self._recover)
++            return
++
++        # 3) Sleeping: snore now and then, wake up when done.
++        if self.state == "sleeping":
++            if now >= self._sleep_until:
++                self.state = "idle"
++                self._start("messe_wake", self._wake_up)
++                self._next_idle_at = now + random.uniform(self.IDLE_MIN_SEC, self.IDLE_MAX_SEC)
++            elif now >= self._next_snore_at:
++                self._snore()
++                self._next_snore_at = now + self.SNORE_EVERY_SEC
++            return
++
++        # 4) Random idle behaviour.
++        if now >= self._next_idle_at:
++            self._random_idle(now)
++
++    def _react_to_touch(self, touch, now):
++        was_sleeping = self.state == "sleeping"
++        self.state = "idle"
++        self._next_idle_at = now + random.uniform(self.IDLE_MIN_SEC, self.IDLE_MAX_SEC)
++        logger.info("Touch: %s (was_sleeping=%s)", touch, was_sleeping)
++
++        if touch in ("LS", "RS"):
++            fn, name = self._happy, "messe_happy"
++        elif was_sleeping or random.random() >= self.BARK_CHANCE:
++            fn, name = self._growl, "messe_growl"
++        else:
++            fn, name = self._bark, "messe_bark"
++
++        def reaction():
++            if was_sleeping:
++                self.actions.sit()
++            fn()
++
++        self._start(name, reaction)
++
++    def _enter_superman(self, now):
++        logger.info("Lift detected -> Superman")
++        self.state = "superman"
++        self._state_since = now
++        self._still_since = None
++        self._out_since = None
++        # The running action is short (a few seconds); retry until it is free.
++        self._superman_pending = not self._start("messe_superman", self._superman)
++
++    def _tick_superman(self, now):
++        if self._superman_pending:
++            if self._start("messe_superman", self._superman):
++                self._superman_pending = False
++                self._state_since = now   # count the hold time from the pose start
++            return
++
++        held = now - self._state_since
++        if held >= self.SUPERMAN_MAX_SEC:
++            self._leave_superman(now, "timeout")
++            return
++        if held < self.SUPERMAN_MIN_SEC:
++            return
++
++        # Put down: after the minimum time, a bump (band exceeded) followed by calm.
++        if self._lift_deviation():
++            self._still_since = None
++            self._bumped = True
++            return
++        if self._bumped:
++            if self._still_since is None:
++                self._still_since = now
++            elif now - self._still_since >= self.SETDOWN_STILL_SEC:
++                self._bumped = False
++                self._leave_superman(now, "put down")
++
++    def _leave_superman(self, now, why):
++        logger.info("Leaving Superman (%s)", why)
++        self.state = "idle"
++        self._bumped = False
++        self._superman_pending = False
++        self._out_since = None
++        self._next_idle_at = now + random.uniform(4.0, 8.0)
++        self._recover_pending = not self._start("messe_recover", self._recover)
+ 
+ 
+ class IdleModeManager:
+     """Coordinates activation and periodic execution of idle modes."""
+ 
+-    def __init__(self, actions):
++    def __init__(self, ctx):
+         self._modes = {
+-            CalmIdleMode.name: CalmIdleMode(actions),
+-            CuriousIdleMode.name: CuriousIdleMode(actions),
+-            SleepyIdleMode.name: SleepyIdleMode(actions),
++            m.name: m
++            for m in (
++                CalmIdleMode(ctx),
++                CuriousIdleMode(ctx),
++                SleepyIdleMode(ctx),
++                MesseIdleMode(ctx),
++            )
+         }
+         self.active_mode = None
+         self._last_tick_ts = 0.0
++        self._paused_until = 0.0
+ 
+     @property
+     def active_name(self):
+@@ -77,6 +402,10 @@ class IdleModeManager:
+             return "off"
+         return self.active_mode.name
+ 
++    def pause_for(self, seconds, now_ts):
++        """Pause the active mode, e.g. after a manual key press."""
++        self._paused_until = now_ts + seconds
++
+     def enable(self, mode_name):
+         mode = self._modes.get(mode_name)
+ 
+@@ -90,6 +419,7 @@ class IdleModeManager:
+         self.disable()
+         self.active_mode = mode
+         self._last_tick_ts = 0.0
++        self._paused_until = 0.0
+ 
+         try:
+             self.active_mode.on_enter()
+@@ -118,6 +448,9 @@ class IdleModeManager:
+         if self.active_mode is None:
+             return
+ 
++        if now_ts < self._paused_until:
++            return
++
+         if self._last_tick_ts == 0.0:
+             self._last_tick_ts = now_ts
+             return
+diff --git a/main.py b/main.py
+index 60455ea..457677d 100644
+--- a/main.py
++++ b/main.py
+@@ -1,8 +1,13 @@
+ import curses
++import sys
++from functools import partial
++
+ from core.logger import setup_logging
+ from app import main
+ 
+ 
+ if __name__ == "__main__":
+     setup_logging()
+-    curses.wrapper(main)
+\ No newline at end of file
++    # python3 main.py --messe  -> start directly in trade-fair idle mode
++    start_idle = "messe" if "--messe" in sys.argv[1:] else None
++    curses.wrapper(partial(main, start_idle=start_idle))
+diff --git a/ui/terminal_ui.py b/ui/terminal_ui.py
+index 8ed54fe..36cf951 100644
+--- a/ui/terminal_ui.py
++++ b/ui/terminal_ui.py
+@@ -74,10 +74,11 @@ def draw_menu(stdscr, dog):
+         "  R          Ready pose",
+         "  Y          Chill pose",
+         "",
+-        "Idle Modes (skeleton)",
++        "Idle Modes",
+         "  1          Calm",
+         "  2          Curious",
+         "  3          Sleepy",
++        "  4          Messe (Superman/Schlafen/Knurren)",
+         "  0          Off",
+         f"  Active     {dog.idle_mode_name}",
+         "",

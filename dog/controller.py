@@ -6,7 +6,7 @@ from threading import Lock, Thread
 from pidog import Pidog
 
 from dog.actions import PiDogActions
-from dog.idle_modes import IdleModeManager
+from dog.idle_modes import IdleContext, IdleModeManager
 from sensors.imu import IMUSensor
 from sensors.sdd import SDDSensor
 from sensors.dual_touch import DualTouchSensor
@@ -27,18 +27,27 @@ class PiDogController:
         sleep(0.5)
 
         self.actions = PiDogActions(self.dog)
-        self.idle_modes = IdleModeManager(self.actions)
         self.imu = IMUSensor(self.dog)
         self.sdd = SDDSensor(self.dog)
         self.dual_touch = DualTouchSensor(self.dog)
         self.running = True
         self._action_thread = None
         self._action_lock = Lock()
+        self.idle_modes = IdleModeManager(
+            IdleContext(
+                actions=self.actions,
+                imu=self.imu,
+                touch=self.dual_touch,
+                sdd=self.sdd,
+                run_async=self._run_action_async,
+                is_busy=self._is_action_running,
+            )
+        )
 
         self.setup_keybindings()
 
         logger.info("PiDog controller started")
-
+        
     @property
     def status(self):
         return self.actions.status
@@ -170,6 +179,7 @@ class PiDogController:
             ord("1"): lambda: self.set_idle_mode("calm"),
             ord("2"): lambda: self.set_idle_mode("curious"),
             ord("3"): lambda: self.set_idle_mode("sleepy"),
+            ord("4"): lambda: self.set_idle_mode("messe"),
             ord("0"): self.disable_idle_mode,
 
             ord(" "): self.actions.stop,
@@ -190,6 +200,9 @@ class PiDogController:
         action = self.keybindings.get(key)
 
         if action:
+            # A manual command pauses the idle mode for a while.
+            self.idle_modes.pause_for(10.0, monotonic())
+
             logger.info("Key pressed: %s", key)
 
             try:

@@ -8,8 +8,10 @@ from ui.terminal_ui import draw_menu
 logger = logging.getLogger(__name__)
 
 
-def main(stdscr):
+def main(stdscr, start_idle=None):
     dog = PiDogController()
+    if start_idle:
+        dog.set_idle_mode(start_idle)
     last_imu_log_ts = 0.0
 
     curses.cbreak()
